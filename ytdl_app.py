@@ -296,11 +296,8 @@ def download():
                 timeout=30
             )
             data = res.json()
-            audios = data.get("audios", [])
-            if audios:
-                best = audios[0]
-                return jsonify({"status": "done", "url": best.get("url"), "filename": f"{data.get('title', 'audio')}.mp3"})
-            return jsonify({"error": "No audio found"})
+            # Debug - return raw keys to see structure
+            return jsonify({"debug": list(data.keys()), "sample": str(data)[:500]})
         else:
             # Get video
             quality = int(fmt) if fmt.isdigit() else 720
