@@ -250,7 +250,7 @@ def info():
             f"https://www.youtube.com/oembed?url={url}&format=json",
             timeout=10
         ).json()
-        vid_match = re.search(r"(?:v=|youtu\.be/)([\w-]{11})", url)
+        vid_match = re.search(r"(?:v=|youtu\.be/|embed/|shorts/)([\w-]{11})", url)
         vid_id = vid_match.group(1) if vid_match else ""
         thumbnail = f"https://img.youtube.com/vi/{vid_id}/hqdefault.jpg" if vid_id else ""
         formats = [
@@ -276,9 +276,9 @@ def download():
     url = request.json.get("url", "")
     fmt = str(request.json.get("format", "720"))
     try:
-        # Extract video ID
+        # Extract video ID - handle all YouTube URL formats
         import re
-        vid_match = re.search(r"(?:v=|youtu\.be/)([\w-]{11})", url)
+        vid_match = re.search(r"(?:v=|youtu\.be/|embed/|shorts/)([\w-]{11})", url)
         if not vid_match:
             return jsonify({"error": "Invalid YouTube URL"})
         video_id = vid_match.group(1)
@@ -296,8 +296,10 @@ def download():
                 timeout=30
             )
             data = res.json()
-            # Debug - return raw keys to see structure
-            return jsonify({"debug": list(data.keys()), "sample": str(data)[:500]})
+            print("API RESPONSE KEYS:", list(data.keys()))
+            print("API RESPONSE:", str(data)[:500])
+            # Return full raw response for debugging
+            return jsonify({"debug": True, "keys": list(data.keys()), "raw": str(data)[:1000]})
         else:
             # Get video
             quality = int(fmt) if fmt.isdigit() else 720
