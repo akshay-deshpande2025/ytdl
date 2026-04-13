@@ -276,29 +276,57 @@ def download():
     url = request.json.get("url", "")
     fmt = str(request.json.get("format", "720"))
     try:
+        # Extract video ID
+        import re
+        vid_match = re.search(r"(?:v=|youtu\.be/)([\w-]{11})", url)
+        if not vid_match:
+            return jsonify({"error": "Invalid YouTube URL"})
+        video_id = vid_match.group(1)
+
+        RAPIDAPI_KEY = "85a46c7986msh0584b4d8d956ecep136782jsnc9c9bcadb79a"
+
         if fmt == "0" or fmt == "mp3":
-            payload = {"url": url, "downloadMode": "audio", "audioFormat": "mp3"}
+            # Get audio
+            res = requests.get(
+                f"https://youtube-media-downloader.p.rapidapi.com/v2/video/details?videoId={video_id}",
+                headers={
+                    "x-rapidapi-key": RAPIDAPI_KEY,
+                    "x-rapidapi-host": "youtube-media-downloader.p.rapidapi.com"
+                },
+                timeout=30
+            )
+            data = res.json()
+            audios = data.get("audios", [])
+            if audios:
+                best = audios[0]
+                return jsonify({"status": "done", "url": best.get("url"), "filename": f"{data.get('title', 'audio')}.mp3"})
+            return jsonify({"error": "No audio found"})
         else:
-            quality = fmt if fmt in ["144","240","360","480","720","1080","1440","2160"] else "720"
-            payload = {"url": url, "downloadMode": "auto", "videoQuality": quality}
+            # Get video
+            quality = int(fmt) if fmt.isdigit() else 720
+            res = requests.get(
+                f"https://youtube-media-downloader.p.rapidapi.com/v2/video/details?videoId={video_id}",
+                headers={
+                    "x-rapidapi-key": RAPIDAPI_KEY,
+                    "x-rapidapi-host": "youtube-media-downloader.p.rapidapi.com"
+                },
+                timeout=30
+            )
+            data = res.json()
+            videos = data.get("videos", [])
+            if not videos:
+                return jsonify({"error": "No video found"})
+            # Find closest quality
+            best = None
+            for v in videos:
+                h = int(v.get("height", 0))
+                if h <= quality:
+                    best = v
+                    break
+            if not best:
+                best = videos[-1]
+            return jsonify({"status": "done", "url": best.get("url"), "filename": f"{data.get('title', 'video')}.mp4"})
 
-        res = requests.post(
-            "https://api.cobalt.tools/",
-            json=payload,
-            headers={"Accept": "application/json", "Content-Type": "application/json"},
-            timeout=30
-        )
-        data = res.json()
-
-        if data.get("status") in ["redirect", "tunnel"]:
-            return jsonify({"status": "done", "url": data.get("url"), "filename": data.get("filename", "download")})
-        elif data.get("status") == "picker":
-            items = data.get("picker", [])
-            if items:
-                return jsonify({"status": "done", "url": items[0].get("url"), "filename": "download.mp4"})
-
-        error_code = data.get("error", {}).get("code", "Download failed")
-        return jsonify({"error": error_code})
     except Exception as e:
         return jsonify({"error": str(e)})
 
