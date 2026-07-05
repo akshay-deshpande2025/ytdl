@@ -1,8 +1,12 @@
 from flask import Flask, request, jsonify, Response
+import os
 import requests
 import re
 
 app = Flask(__name__)
+
+RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY", "")
+RAPIDAPI_HOST = "youtube-media-downloader.p.rapidapi.com"
 
 HTML = '''<!DOCTYPE html>
 <html lang="en">
@@ -150,6 +154,7 @@ async function fetchInfo() {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({url})
     });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
     if (data.error) { showError(data.error); return; }
     document.getElementById('videoThumb').src = data.thumbnail;
@@ -192,16 +197,19 @@ async function startDownload() {
     });
     const data = await res.json();
     document.getElementById('loadingSection').classList.remove('show');
+    btn.innerHTML = '⬇ DOWNLOAD'; btn.disabled = false;
     if (data.error) {
       showError(data.error);
       document.getElementById('videoCard').classList.add('show');
-      btn.innerHTML = '⬇ DOWNLOAD'; btn.disabled = false;
       return;
     }
     if (data.status === 'done' && data.url) {
       document.getElementById('readyFilename').textContent = data.filename || 'Your file is ready';
       document.getElementById('saveLink').href = data.url;
       document.getElementById('readySection').classList.add('show');
+    } else {
+      showError('Unexpected response from server. Try again.');
+      document.getElementById('videoCard').classList.add('show');
     }
   } catch(e) {
     document.getElementById('loadingSection').classList.remove('show');
@@ -244,7 +252,8 @@ def index():
 @app.route("/info", methods=["POST", "OPTIONS"])
 def info():
     if request.method == "OPTIONS": return cors(Response())
-    url = request.json.get("url", "")
+    body = request.get_json(silent=True) or {}
+    url = body.get("url", "")
     try:
         oembed = requests.get(
             f"https://www.youtube.com/oembed?url={url}&format=json",
@@ -267,67 +276,91 @@ def info():
             "duration": 0,
             "formats": formats
         })
-    except Exception as e:
-        return jsonify({"error": str(e)})
+    except Exception:
+        return jsonify({"error": "Could not look up that video. Check the URL and try again."})
+
+def fetch_video_details(video_id):
+    res = requests.get(
+        f"https://{RAPIDAPI_HOST}/v2/video/details",
+        params={"videoId": video_id},
+        headers={"x-rapidapi-key": RAPIDAPI_KEY, "x-rapidapi-host": RAPIDAPI_HOST},
+        timeout=30,
+    )
+    res.raise_for_status()
+    return res.json()
+
+
+def extract_items(section):
+    # The API nests streams as {"videos": {"items": [...]}}; tolerate a flat
+    # list too in case the response shape changes.
+    if isinstance(section, dict):
+        items = section.get("items")
+        return items if isinstance(items, list) else []
+    if isinstance(section, list):
+        return section
+    return []
+
+
+def stream_height(stream):
+    h = stream.get("height")
+    if isinstance(h, int):
+        return h
+    m = re.search(r"(\d{3,4})", str(stream.get("quality", "")))
+    return int(m.group(1)) if m else 0
+
+
+def safe_filename(title):
+    return re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", title).strip()[:150] or "video"
+
 
 @app.route("/download", methods=["POST", "OPTIONS"])
 def download():
     if request.method == "OPTIONS": return cors(Response())
-    url = request.json.get("url", "")
-    fmt = str(request.json.get("format", "720"))
+    body = request.get_json(silent=True) or {}
+    url = body.get("url", "")
+    fmt = str(body.get("format", "720"))
+
+    if not RAPIDAPI_KEY:
+        return jsonify({"error": "Server is not configured: set the RAPIDAPI_KEY environment variable"})
+
+    vid_match = re.search(r"(?:v=|youtu\.be/|embed/|shorts/)([\w-]{11})", url)
+    if not vid_match:
+        return jsonify({"error": "Invalid YouTube URL"})
+    video_id = vid_match.group(1)
+
     try:
-        # Extract video ID - handle all YouTube URL formats
-        import re
-        vid_match = re.search(r"(?:v=|youtu\.be/|embed/|shorts/)([\w-]{11})", url)
-        if not vid_match:
-            return jsonify({"error": "Invalid YouTube URL"})
-        video_id = vid_match.group(1)
+        data = fetch_video_details(video_id)
+    except requests.RequestException:
+        return jsonify({"error": "Could not reach the download service. Try again in a moment."})
+    except ValueError:
+        return jsonify({"error": "The download service returned an unreadable response."})
 
-        RAPIDAPI_KEY = "85a46c7986msh0584b4d8d956ecep136782jsnc9c9bcadb79a"
+    # Surface upstream failures (blocked video, quota exceeded, etc.) clearly
+    if data.get("status") is False or data.get("errorId") not in (None, "Success"):
+        reason = data.get("reason") or data.get("message") or data.get("errorId")
+        return jsonify({"error": f"Download service error: {reason or 'unknown'}"})
 
-        if fmt == "0" or fmt == "mp3":
-            # Get audio
-            res = requests.get(
-                f"https://youtube-media-downloader.p.rapidapi.com/v2/video/details?videoId={video_id}",
-                headers={
-                    "x-rapidapi-key": RAPIDAPI_KEY,
-                    "x-rapidapi-host": "youtube-media-downloader.p.rapidapi.com"
-                },
-                timeout=30
-            )
-            data = res.json()
-            print("API RESPONSE KEYS:", list(data.keys()))
-            print("API RESPONSE:", str(data)[:500])
-            # Return full raw response for debugging
-            return jsonify({"debug": True, "keys": list(data.keys()), "raw": str(data)[:1000]})
-        else:
-            # Get video
-            quality = int(fmt) if fmt.isdigit() else 720
-            res = requests.get(
-                f"https://youtube-media-downloader.p.rapidapi.com/v2/video/details?videoId={video_id}",
-                headers={
-                    "x-rapidapi-key": RAPIDAPI_KEY,
-                    "x-rapidapi-host": "youtube-media-downloader.p.rapidapi.com"
-                },
-                timeout=30
-            )
-            data = res.json()
-            videos = data.get("videos", [])
-            if not videos:
-                return jsonify({"error": "No video found"})
-            # Find closest quality
-            best = None
-            for v in videos:
-                h = int(v.get("height", 0))
-                if h <= quality:
-                    best = v
-                    break
-            if not best:
-                best = videos[-1]
-            return jsonify({"status": "done", "url": best.get("url"), "filename": f"{data.get('title', 'video')}.mp4"})
+    title = safe_filename(data.get("title") or "video")
 
-    except Exception as e:
-        return jsonify({"error": str(e)})
+    if fmt in ("0", "mp3"):
+        audios = [a for a in extract_items(data.get("audios")) if a.get("url")]
+        if not audios:
+            return jsonify({"error": "No audio stream available for this video"})
+        # Items are typically ordered best-first; fall back to largest file
+        best = max(audios, key=lambda a: int(a.get("size") or 0))
+        ext = best.get("extension") or "m4a"
+        return jsonify({"status": "done", "url": best["url"], "filename": f"{title}.{ext}"})
+
+    quality = int(fmt) if fmt.isdigit() else 720
+    videos = [v for v in extract_items(data.get("videos")) if v.get("url")]
+    if not videos:
+        return jsonify({"error": "No downloadable video streams found (the video may be blocked)"})
+    # Prefer streams that include audio when the API flags them
+    with_audio = [v for v in videos if v.get("hasAudio") is not False]
+    candidates = sorted(with_audio or videos, key=stream_height, reverse=True)
+    best = next((v for v in candidates if stream_height(v) <= quality), candidates[-1])
+    ext = best.get("extension") or "mp4"
+    return jsonify({"status": "done", "url": best["url"], "filename": f"{title}.{ext}"})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=False)
